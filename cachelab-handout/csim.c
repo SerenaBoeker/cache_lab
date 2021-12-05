@@ -3,6 +3,13 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <stdlib.h>
+#define HIT " hit"
+#define MISS " miss"
+#define EVICT " eviction"
+
+int num_of_hits = 0, num_of_misses = 0, num_of_evicts = 0;
+int hitflag = 0, missflag = 0, evictflag = 0;
+int timecounter = 0;
 
 struct cache_line {
 	int valid_bit;
@@ -10,10 +17,24 @@ struct cache_line {
 	int lru_count;
 };
 
+// computes binary number of given unsigned int and returns it
+// in a int array of 64 bits.
+// @param num unsigned int to convert to binary
+// @return binaryArray int-pointer to the "64bit" array holding the binary
+// 					   number
+int * binaryNumber(unsigned int num) {
+    int *binaryArray = (int*) calloc(64, sizeof(int));
+    for(int i = 63; i >= 0; i--) {
+        binaryArray[i] = num%2;
+        num = num/2;
+    }
+    return binaryArray;
+}
+
 int main(int argc, char** argv) {
 	// initialize arguments with 0
 	// read command line arguments
-	int opt, vflag = 0, svalue = 0, evalue = 0, bvalue = 0;
+	int opt, vflag = 0, s = 0, e = 0, b = 0;
 	char* tracefile = NULL;
 	while( (opt = getopt(argc, argv, "hvs:E:b:t:")) != -1 ) {
 		switch(opt) {
@@ -24,13 +45,13 @@ int main(int argc, char** argv) {
 				vflag = 1;
 				break;
 			case 's':
-				svalue = atoi(optarg);
+				s = atoi(optarg);
 				break;
 			case 'E':
-				evalue = atoi(optarg);
+				e = atoi(optarg);
 				break;
 			case 'b':
-				bvalue = atoi(optarg);
+				b = atoi(optarg);
 				break;
 			case 't':
 				tracefile = optarg;
@@ -42,20 +63,18 @@ int main(int argc, char** argv) {
 	}
 
 	// print an error if any of the arguments are wrong or missing
-	if ( (svalue <= 0) || (evalue <= 0) || (bvalue <= 0) || (tracefile == NULL)) {
+	if ( (s <= 0) || (e <= 0) || (b <= 0) || (tracefile == NULL)) {
 		fprintf(stderr, "One or more arguments wrong or missing!\n");
 		exit(EXIT_FAILURE);
 	}
 
 	// initialize cache (= 2D array of cache_line structs)
-	int S = 2^svalue;
-	int E = 2^evalue;
-	struct cache_line *p_cache = (struct cache_line *) malloc(sizeof(struct cache_line) * S * E);
-	if (p_cache == NULL) {
-		fprintf(stderr, "malloc of size %ld failed!\n", sizeof(struct cache_line) * S * E);
+	int nr_of_sets = 1 << s;
+
+	struct cache_line *cache = (struct cache_line *) calloc(3 * nr_of_sets * e, sizeof(int));
+	if (cache == NULL) {
+		fprintf(stderr, "calloc of size %ld failed!\n", sizeof(struct cache_line) * nr_of_sets * e);
 		exit(EXIT_FAILURE);
-	} else {
-		fprintf(stdout, "malloc of size %ld successful\n", sizeof(struct cache_line) * S * E);
 	}
 
 	FILE* pFile = fopen(tracefile, "r");
@@ -66,13 +85,76 @@ int main(int argc, char** argv) {
 		if(identifier == 'I') {
 			continue;
 		}
-		if(vflag) {
-			fprintf(stdout, "%c %x,%d\n", identifier, address, size);
+		int times = 1;
+		if(identifier == 'M') {
+			times = 2;
 		}
+		unsigned int rshift_by_Bbits = address >> b;
+		unsigned int lshift_by_Bbits = rshift_by_Bbits << b;
+		unsigned int rshift_by_Sbits = lshift_by_Bbits >> (s+b);
+		unsigned int lshift_by_Sbits = rshift_by_Sbits << (s+b);
+		unsigned int set = (lshift_by_Bbits - lshift_by_Sbits) >> b ;
+		unsigned int tag = rshift_by_Sbits;
+
+		while(times > 0) {
+			for(int i = 0 ; i < e; i++) {								// retrieve the set with the corresponding cache_lines
+				if(cache[(set*e)+i].valid_bit) {						// check for each cache_line if valid
+					if(cache[(set*e)+i].tag == tag) {					// if cache_line valid, check if tag fits
+						hitflag = 1;									// if tag fits, set hitflag to 1
+						num_of_hits++;
+						timecounter++;
+						cache[(set*e)+i].lru_count = timecounter;		// and increase lru_count
+					}
+				}
+			}
+			if(!hitflag) {												// if not found in memory
+				for(int i = 0 ; i < e; i++) {
+					if(missflag) break;
+					if(!cache[(set*e)+i].valid_bit) {					// check for first invalid cache_line
+						cache[(set*e)+i].valid_bit = 1;					// and set it to valid
+						cache[(set*e)+i].tag = tag;
+						timecounter++;
+						cache[(set*e)+i].lru_count = timecounter;
+						missflag = 1;									// it was a miss
+						num_of_misses++;
+					}
+				}
+				if(!missflag) {											// if no unused cache_lines
+					int minLRUcount = cache[set*e].lru_count;			// set the minimum lru count to first cache_line
+					int index = set*e;									// save its index
+					for(int i = 0 ; i < e; i++) {
+						if(cache[(set*e)+i].lru_count < minLRUcount) {	// check if another line in same set has a lower count
+							minLRUcount = cache[(set*e)+i].lru_count;
+							index = (set*e)+i;
+						}
+					}
+					cache[index].tag = tag;								// replace cache_line with lowest lru_count
+					timecounter++;
+					cache[index].lru_count = timecounter;
+					missflag = 1;
+					evictflag = 1;										// it was a miss and eviction
+					num_of_misses++;
+					num_of_evicts++;
+				}
+			}
+			times--;
+		}
+
+		if(vflag) {
+			fprintf(stdout, "%c %x,%d", identifier, address, size);
+			if(missflag) printf(MISS);
+			if(evictflag) printf(EVICT);
+			if(hitflag) printf(HIT);
+			printf("\n");
+		}
+		hitflag = 0;
+		missflag = 0;
+		evictflag = 0;
 	}
 	fclose(pFile);
 
-  	printSummary(0, 0, 0);
-	free(p_cache);
+  	printSummary(num_of_hits, num_of_misses, num_of_evicts);
+
+	free(cache);
   	return 0;
 }
